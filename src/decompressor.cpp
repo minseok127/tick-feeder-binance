@@ -25,7 +25,11 @@ std::string unzip_file(const std::string &zip_path,
 		return "";
 	}
 
-	/* Find the extracted CSV file */
+	/*
+	 * Find the extracted CSV file. Each Binance aggTrades ZIP
+	 * contains exactly one CSV file named like:
+	 * BTCUSDT-aggTrades-2024-01.csv
+	 */
 	DIR *d = opendir(dest_dir.c_str());
 	if (!d) {
 		return "";

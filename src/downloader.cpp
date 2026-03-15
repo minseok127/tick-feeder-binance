@@ -10,12 +10,18 @@
 #include <ctime>
 #include <iostream>
 
+/* libcurl write callback: stream data directly to file */
 static size_t write_cb(void *ptr, size_t size, size_t nmemb,
 	void *stream)
 {
 	return fwrite(ptr, size, nmemb, (FILE *)stream);
 }
 
+/*
+ * Progress tracking. g_progress_shown is set when at least one
+ * progress line has been printed, so we know to emit a trailing
+ * newline after the download completes.
+ */
 static bool g_progress_shown = false;
 
 static int progress_cb(void * /*clientp*/,
@@ -81,6 +87,11 @@ int download_file(const std::string &url,
 		return -1;
 	}
 
+	/*
+	 * Non-200 responses (e.g. 404 for missing daily data)
+	 * are not errors — the caller decides how to handle them.
+	 * Clean up the partial file either way.
+	 */
 	if (http_code != 200) {
 		remove(dest_path.c_str());
 		return (int)http_code;
@@ -89,6 +100,11 @@ int download_file(const std::string &url,
 	return 200;
 }
 
+/*
+ * Binance Vision URL builders.
+ * Monthly archives are available for completed months;
+ * daily archives are used for the current (incomplete) month.
+ */
 std::string make_monthly_url(const std::string &symbol,
 	int year, int month)
 {
@@ -114,6 +130,10 @@ std::string make_daily_url(const std::string &symbol,
 	return buf;
 }
 
+/*
+ * Sum file sizes in a flat directory (non-recursive).
+ * Used to check temp disk usage against temp_disk_limit_mb.
+ */
 size_t get_dir_size(const std::string &dir)
 {
 	size_t total = 0;

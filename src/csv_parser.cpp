@@ -41,6 +41,16 @@ int csv_parse_and_feed(const std::string &csv_path,
 	uint64_t fed = 0;
 	trcache_trade_data td;
 
+	/*
+	 * Binance aggTrades CSV format (no header row):
+	 *   0: agg_trade_id
+	 *   1: price
+	 *   2: quantity
+	 *   3: first_trade_id  (unused)
+	 *   4: last_trade_id   (unused)
+	 *   5: timestamp       (epoch ms)
+	 *   6: is_buyer_maker  (unused)
+	 */
 	while (fgets(line, sizeof(line), fp)) {
 		bytes_read += strlen(line);
 		/* Column 0: agg_trade_id */
@@ -76,6 +86,11 @@ int csv_parse_and_feed(const std::string &csv_path,
 
 		/* Column 6: is_buyer_maker (skip) */
 
+		/*
+		 * Pack into trcache_trade_data and feed.
+		 * trcache_feed_trade_data is thread-safe; here
+		 * we call it single-threaded per symbol.
+		 */
 		td.timestamp = timestamp;
 		td.trade_id = trade_id;
 		td.price.as_double = price;

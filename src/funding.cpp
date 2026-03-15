@@ -68,7 +68,12 @@ int funding_fetch(const std::string &symbol,
 	std::string time_path = dir + "/funding_time.bin";
 	std::string rate_path = dir + "/funding_rate.bin";
 
-	/* Determine start time from existing data */
+	/*
+	 * Determine start time for incremental fetch.
+	 * Read the last uint64_t from funding_time.bin to find
+	 * the most recent timestamp already stored, then start
+	 * from the next millisecond.
+	 */
 	uint64_t start_time = 0;
 	{
 		struct stat st;
@@ -102,6 +107,11 @@ int funding_fetch(const std::string &symbol,
 
 	int total = 0;
 
+	/*
+	 * Paginated fetch: Binance returns max 1000 records per
+	 * request. Keep fetching until fewer than 1000 are returned
+	 * (indicating the end of available data).
+	 */
 	while (true) {
 		char url[512];
 		snprintf(url, sizeof(url),

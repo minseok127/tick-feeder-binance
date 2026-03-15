@@ -20,7 +20,13 @@ static const int NUM_OUTPUT_FIELDS = 5;
 
 /*
  * Per-(symbol, candle_type) file descriptor set.
- * key_fd is for keys.bin, field_fds[i] for each OHLCV field.
+ *
+ * key_fd:       fd for keys.bin (candle key — trade_id or timestamp)
+ * field_fds[i]: fd for each OHLCV column file
+ * *_offset:     current write offset for pwrite; tracks how much
+ *               data has been written, enabling append without lseek
+ * candle_count: number of candles written so far; used by main
+ *               to populate metadata for incremental resume
  */
 struct file_set {
 	int key_fd;
@@ -72,6 +78,11 @@ static int open_bin(const std::string &dir, const char *name)
 	return fd;
 }
 
+/*
+ * Lazily open output files for a (symbol, candle_type) pair.
+ * Creates the directory tree (e.g. output/BTCUSDT/5tick/) on first
+ * access and sets offsets to current file sizes for correct append.
+ */
 static void ensure_files_open(output_writer_ctx *ctx,
 	int symbol_id, int candle_idx)
 {
@@ -149,6 +160,14 @@ static void write_range(file_set &fs,
 	fs.candle_count += (uint64_t)count;
 }
 
+/*
+ * Batch flush callback — invoked by trcache when a candle batch
+ * is ready (either a full batch or during trcache_destroy).
+ *
+ * Writes only closed candles to disk. Unclosed candles at the
+ * end of a batch are in-progress aggregations that will be
+ * flushed in a later batch or during engine teardown.
+ */
 static void flush_cb(trcache * /*cache*/,
 	trcache_candle_batch *batch, void *ctx_ptr)
 {
@@ -206,6 +225,10 @@ static void flush_cb(trcache * /*cache*/,
 	}
 }
 
+/*
+ * is_done callback: signals that flush_cb completed synchronously.
+ * Always returns true since pwrite is blocking.
+ */
 static bool is_done_cb(trcache * /*cache*/,
 	trcache_candle_batch * /*batch*/, void * /*ctx*/)
 {

@@ -18,11 +18,21 @@
 
 #define MAX_CANDLE_SLOTS 8
 
-/* Per-slot config storage for template callbacks. */
+/*
+ * Global per-slot config storage. Each template instantiation
+ * (e.g. init_tick_modulo<0>) reads g_slot_configs[0].threshold
+ * at runtime. This avoids passing config through trcache's
+ * opaque callback interface.
+ */
 static candle_config g_slot_configs[MAX_CANDLE_SLOTS];
 
 /* -----------------------------------------------------------
  * Callback Logic
+ *
+ * init_common:   Called when a new candle is created.
+ *                Sets OHLCV from the first trade.
+ * update_common: Called for each subsequent trade in the candle.
+ *                Updates high/low/close and accumulates volume.
  * ----------------------------------------------------------- */
 
 static void init_common(trcache_candle_base *c,
@@ -54,9 +64,28 @@ static void update_common(feeder_candle *candle,
 
 /* -----------------------------------------------------------
  * Slot Template System
+ *
+ * trcache requires per-candle-type init/update function pointers.
+ * Because each candle type has a different threshold, we use C++
+ * templates parameterized by slot index (0..MAX_CANDLE_SLOTS-1)
+ * to generate distinct functions at compile time. Each function
+ * reads its threshold from g_slot_configs[SLOT].
+ *
+ * The update callback returns:
+ *   true  — trade was consumed (applied to this candle)
+ *   false — trade belongs to the next candle (current one is closed)
  * ----------------------------------------------------------- */
 
-/* TICK_MODULO: candle closes when (trade_id + 1) % threshold == 0 */
+/*
+ * TICK_MODULO strategy:
+ *   Key:   floor-aligned trade_id (trade_id - trade_id % threshold)
+ *   Close: when (trade_id + 1) % threshold == 0, meaning exactly
+ *          `threshold` trades have been aggregated.
+ *
+ * The guard in update (trade_id >= key + threshold) handles gaps
+ * in trade IDs — if a trade arrives beyond the current window,
+ * the candle is force-closed without consuming the trade.
+ */
 template <int SLOT>
 void init_tick_modulo(trcache_candle_base *c, void *data,
 	const void *)
@@ -78,6 +107,7 @@ bool update_tick_modulo(trcache_candle_base *c, void *data,
 	feeder_candle *candle = (feeder_candle *)c;
 	int threshold = g_slot_configs[SLOT].threshold;
 
+	/* Gap guard: trade beyond current window → force close */
 	if (d->trade_id >= c->key.trade_id +
 	    (uint64_t)threshold) {
 		c->is_closed = true;
@@ -86,13 +116,21 @@ bool update_tick_modulo(trcache_candle_base *c, void *data,
 
 	update_common(candle, d);
 
+	/* Normal close: exactly threshold trades aggregated */
 	if ((d->trade_id + 1) % threshold == 0) {
 		c->is_closed = true;
 	}
 	return true;
 }
 
-/* TIME_FIXED: candle closes when timestamp crosses window */
+/*
+ * TIME_FIXED strategy:
+ *   Key:   floor-aligned timestamp (timestamp - timestamp % threshold)
+ *   Close: when a trade's timestamp crosses the window boundary
+ *          (key + threshold). Unlike TICK_MODULO, there is no
+ *          explicit close within update — a candle stays open
+ *          until a trade from the next window arrives.
+ */
 template <int SLOT>
 void init_time_fixed(trcache_candle_base *c, void *data,
 	const void *)
@@ -124,7 +162,10 @@ bool update_time_fixed(trcache_candle_base *c, void *data,
 	return true;
 }
 
-/* Function pointer lookup tables */
+/*
+ * Lookup tables for template instantiations.
+ * engine_init() indexes these by candle slot number.
+ */
 typedef void (*init_func_t)(trcache_candle_base *, void *,
 	const void *);
 typedef bool (*update_func_t)(trcache_candle_base *, void *,
@@ -162,6 +203,13 @@ static const update_func_t UPDATE_TIME_OPS[] = {
  * Engine Init / Destroy
  * ----------------------------------------------------------- */
 
+/*
+ * Initialize trcache with candle configs from the feeder config.
+ *
+ * For each candle type, selects the appropriate template-instantiated
+ * init/update callbacks based on the slot index and strategy type,
+ * then wires in the output_writer's flush callback.
+ */
 struct trcache *engine_init(const feeder_config &config,
 	output_writer_ctx *writer)
 {
@@ -184,6 +232,11 @@ struct trcache *engine_init(const feeder_config &config,
 
 		trcache_candle_update_ops u_ops = {};
 
+		/*
+		 * Select the template instantiation matching this
+		 * slot index. e.g. slot 2 with TICK_MODULO uses
+		 * init_tick_modulo<2> / update_tick_modulo<2>.
+		 */
 		if (cc.type == "TICK_MODULO") {
 			u_ops.init = INIT_TICK_OPS[i];
 			u_ops.update = UPDATE_TICK_OPS[i];
@@ -208,6 +261,7 @@ struct trcache *engine_init(const feeder_config &config,
 
 	size_t mem_bytes =
 		(size_t)config.memory_limit_mb * (1ULL << 20);
+	/* +10 headroom for future dynamic symbol registration */
 	int max_symbols =
 		(int)config.symbols.size() + 10;
 

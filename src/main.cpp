@@ -23,6 +23,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <csignal>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -30,6 +31,19 @@
 #include <iostream>
 #include <string>
 #include <vector>
+
+/*
+ * Shutdown flag set by SIGINT/SIGTERM handler.
+ * Checked in processing loops to allow graceful exit:
+ * finish the current file, then proceed to engine teardown
+ * and final metadata save.
+ */
+static volatile sig_atomic_t g_shutdown = 0;
+
+static void shutdown_handler(int /*sig*/)
+{
+	g_shutdown = 1;
+}
 
 struct date {
 	int year;
@@ -80,7 +94,9 @@ static std::string format_date(const date &d)
 
 /*
  * Default start dates for known symbols.
- * Binance Futures aggTrades availability.
+ * These correspond to when each symbol's aggTrades data
+ * first became available on Binance Vision.
+ * Unknown symbols default to 2020-01-01.
  */
 static date default_start(const std::string &symbol)
 {
@@ -119,18 +135,27 @@ static void clean_temp(const std::string &temp_dir)
 /*
  * Process all data for a single symbol.
  *
- * Downloads monthly/daily zips, feeds CSV through trcache,
- * and cleans up temporary files.
+ * Strategy: iterate month by month from start to today.
+ *   - For completed months: try monthly ZIP first (one large file).
+ *   - For the current month (or if monthly is unavailable):
+ *     fall back to daily ZIPs.
+ *
+ * Saves last_processed_date as a checkpoint after each month so
+ * that a crash-restart skips already-downloaded data. The accurate
+ * last_closed_trade_id and candle_counts are saved later, after
+ * engine_destroy has flushed all pending batches.
  */
 static int process_symbol(const feeder_config &config,
 	struct trcache *cache, int symbol_id,
 	const std::string &symbol,
-	output_writer_ctx *writer,
 	metadata_map &meta)
 {
 	symbol_metadata &sm = meta[symbol];
 
-	/* Determine start date */
+	/*
+	 * Resume from last_processed_date if available,
+	 * otherwise start from the symbol's default start date.
+	 */
 	date start;
 	if (!sm.last_processed_date.empty()) {
 		start = parse_date(sm.last_processed_date);
@@ -139,6 +164,12 @@ static int process_symbol(const feeder_config &config,
 	}
 
 	date end = today();
+	/*
+	 * skip_id: trades with id <= this value are skipped.
+	 * Loaded once from metadata and not updated during
+	 * processing — the accurate value is saved after
+	 * engine_destroy when all batches have been flushed.
+	 */
 	uint64_t skip_id = sm.last_closed_trade_id;
 
 	/* Count total months for progress */
@@ -157,15 +188,21 @@ static int process_symbol(const feeder_config &config,
 	int cur_year = start.year;
 	int cur_month = start.month;
 
-	while (cur_year < end.year ||
-	       (cur_year == end.year &&
-		cur_month <= end.month)) {
+	while (!g_shutdown &&
+	       (cur_year < end.year ||
+	        (cur_year == end.year &&
+		 cur_month <= end.month))) {
 		bool is_current_month =
 			(cur_year == end.year &&
 			 cur_month == end.month);
 
 		if (!is_current_month) {
-			/* Try monthly download */
+			/*
+			 * Try monthly download first — one file
+			 * per month is faster than 28-31 daily files.
+			 * If the monthly ZIP returns non-200 (not yet
+			 * published), fall through to daily downloads.
+			 */
 			std::string url = make_monthly_url(
 				symbol, cur_year, cur_month);
 			char fname[256];
@@ -197,34 +234,17 @@ static int process_symbol(const feeder_config &config,
 				}
 				remove(zip_path.c_str());
 
-				/* Update skip_id */
-				uint64_t ltid =
-					output_writer_get_last_trade_id(
-						writer, symbol_id);
-				if (ltid > skip_id) {
-					skip_id = ltid;
-				}
-
-				/* Update metadata */
+				/*
+				 * Save last_processed_date as a
+				 * checkpoint so we can skip this
+				 * month on restart after a crash.
+				 */
 				int last_day = days_in_month(
 					cur_year, cur_month);
 				date d = {cur_year, cur_month,
 					last_day};
 				sm.last_processed_date =
 					format_date(d);
-				sm.last_closed_trade_id = skip_id;
-
-				for (int ci = 0;
-				     ci < (int)config.candles.size();
-				     ci++) {
-					sm.candle_counts[
-						config.candles[ci].name] =
-						output_writer_get_candle_count(
-							writer,
-							symbol_id,
-							ci);
-				}
-
 				metadata_save(config.metadata_path,
 					meta);
 			} else {
@@ -236,7 +256,11 @@ static int process_symbol(const feeder_config &config,
 		}
 
 		if (is_current_month) {
-			/* Daily downloads */
+			/*
+			 * Daily downloads: used for the current
+			 * month or when the monthly archive is not
+			 * yet available on Binance Vision.
+			 */
 			int start_day = 1;
 			if (cur_year == start.year &&
 			    cur_month == start.month &&
@@ -244,6 +268,11 @@ static int process_symbol(const feeder_config &config,
 				start_day = start.day;
 			}
 
+			/*
+			 * Stop at yesterday (end.day - 1) for the
+			 * current month since today's data is
+			 * still accumulating.
+			 */
 			int last_day;
 			if (cur_year == end.year &&
 			    cur_month == end.month) {
@@ -253,7 +282,8 @@ static int process_symbol(const feeder_config &config,
 					cur_year, cur_month);
 			}
 
-			for (int d = start_day; d <= last_day; d++) {
+			for (int d = start_day;
+		     d <= last_day && !g_shutdown; d++) {
 				std::string url = make_daily_url(
 					symbol, cur_year,
 					cur_month, d);
@@ -294,55 +324,18 @@ static int process_symbol(const feeder_config &config,
 					remove(csv.c_str());
 				}
 				remove(zip_path.c_str());
-
-				uint64_t ltid =
-					output_writer_get_last_trade_id(
-						writer, symbol_id);
-				if (ltid > skip_id) {
-					skip_id = ltid;
-				}
 			}
 
-			/* Update metadata for daily batch */
+			/*
+			 * Save last_processed_date checkpoint
+			 * for the daily batch.
+			 */
 			date last = {cur_year, cur_month, last_day};
 			sm.last_processed_date = format_date(last);
-			sm.last_closed_trade_id = skip_id;
-
-			for (int ci = 0;
-			     ci < (int)config.candles.size();
-			     ci++) {
-				sm.candle_counts[
-					config.candles[ci].name] =
-					output_writer_get_candle_count(
-						writer,
-						symbol_id, ci);
-			}
-
 			metadata_save(config.metadata_path, meta);
 		}
 
-		/* Report candle counts and output size */
 		done_months++;
-		for (int ci = 0;
-		     ci < (int)config.candles.size(); ci++) {
-			uint64_t cnt =
-				output_writer_get_candle_count(
-					writer, symbol_id, ci);
-			if (cnt > 0) {
-				printf("  [%s] candles so far: %lu\n",
-					config.candles[ci].name.c_str(),
-					(unsigned long)cnt);
-			}
-		}
-		uint64_t sym_bytes =
-			output_writer_get_total_bytes(
-				writer, symbol_id);
-		uint64_t all_bytes =
-			output_writer_get_total_bytes(
-				writer, -1);
-		printf("  Output size: %s (total: %s)\n",
-			format_bytes(sym_bytes).c_str(),
-			format_bytes(all_bytes).c_str());
 
 		/* Advance to next month */
 		cur_month++;
@@ -375,6 +368,10 @@ int main(int argc, char *argv[])
 		usage(argv[0]);
 		return 1;
 	}
+
+	/* Register signal handlers for graceful shutdown */
+	signal(SIGINT, shutdown_handler);
+	signal(SIGTERM, shutdown_handler);
 
 	/* 1. Load config */
 	feeder_config config;
@@ -458,63 +455,51 @@ int main(int argc, char *argv[])
 	}
 
 	/* 6. Process each symbol */
-	for (size_t i = 0; i < config.symbols.size(); i++) {
+	for (size_t i = 0;
+	     i < config.symbols.size() && !g_shutdown; i++) {
 		process_symbol(config, cache, symbol_ids[i],
-			config.symbols[i], writer, meta);
+			config.symbols[i], meta);
 	}
 
-	/* 7. Flush residual candles via query API */
-	for (size_t si = 0; si < config.symbols.size(); si++) {
-		int sid = symbol_ids[si];
+	if (g_shutdown) {
+		printf("\nShutdown requested, finishing up...\n");
+	}
+
+	/*
+	 * 7. Destroy engine.
+	 * trcache_destroy flushes all remaining candle batches
+	 * (including partially filled ones) via the flush
+	 * callback before freeing resources.
+	 */
+	engine_destroy(cache);
+
+	/*
+	 * 8. Final metadata save.
+	 * Now that engine_destroy has flushed all pending batches,
+	 * output_writer's last_trade_id values are fully accurate.
+	 * Save metadata before destroying the writer.
+	 */
+	for (size_t i = 0; i < config.symbols.size(); i++) {
+		const std::string &sym = config.symbols[i];
+		int sid = symbol_ids[i];
+		symbol_metadata &sm = meta[sym];
+
+		uint64_t ltid =
+			output_writer_get_last_trade_id(
+				writer, sid);
+		if (ltid > sm.last_closed_trade_id) {
+			sm.last_closed_trade_id = ltid;
+		}
+
 		for (int ci = 0;
 		     ci < (int)config.candles.size(); ci++) {
-			/*
-			 * Query the most recent candles that may
-			 * not have been batch-flushed yet.
-			 * batch_size = 2^batch_size_pow2
-			 */
-			int batch_sz =
-				1 << config.batch_size_pow2;
-			trcache_candle_batch *batch =
-				trcache_batch_alloc_on_heap(
-					cache, ci, batch_sz,
-					nullptr);
-			if (!batch) continue;
-
-			int ret =
-				trcache_get_candles_by_symbol_id_and_offset(
-					cache, sid, ci,
-					nullptr, 0, batch_sz,
-					batch);
-
-			if (ret == 0 && batch->num_candles > 0) {
-				/*
-				 * Filter: only write closed candles
-				 * that haven't been flushed yet.
-				 * The output_writer tracks candle
-				 * count; compare.
-				 */
-				uint64_t already =
-					output_writer_get_candle_count(
-						writer, sid, ci);
-				/*
-				 * The query returns the most recent
-				 * candles. We need the ones not yet
-				 * written. This is approximate;
-				 * we write all closed candles from
-				 * the query result to a temporary
-				 * batch and let the writer handle it.
-				 *
-				 * For simplicity, skip residual
-				 * flushing here. The last partial
-				 * batch will be picked up on the
-				 * next incremental run.
-				 */
-				(void)already;
-			}
-			trcache_batch_free(batch);
+			sm.candle_counts[
+				config.candles[ci].name] =
+				output_writer_get_candle_count(
+					writer, sid, ci);
 		}
 	}
+	metadata_save(config.metadata_path, meta);
 
 	/* Report total output size */
 	uint64_t total_bytes =
@@ -522,16 +507,16 @@ int main(int argc, char *argv[])
 	printf("Total output size: %s\n",
 		format_bytes(total_bytes).c_str());
 
-	/* 8. Cleanup engine */
-	engine_destroy(cache);
 	output_writer_destroy(writer);
 
-	/* 9. Fetch funding rates */
-	curl_global_init(CURL_GLOBAL_DEFAULT);
-	for (const auto &sym : config.symbols) {
-		funding_fetch(sym, config.output_dir);
+	/* 9. Fetch funding rates (skip on shutdown) */
+	if (!g_shutdown) {
+		curl_global_init(CURL_GLOBAL_DEFAULT);
+		for (const auto &sym : config.symbols) {
+			funding_fetch(sym, config.output_dir);
+		}
+		curl_global_cleanup();
 	}
-	curl_global_cleanup();
 
 	/* 10. Clean temp dir */
 	clean_temp(config.temp_dir);

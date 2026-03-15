@@ -25,6 +25,7 @@ metadata_map metadata_load(const std::string &path)
 		return meta;
 	}
 
+	/* Each top-level key is a symbol name (e.g. "BTCUSDT") */
 	for (auto it = j.begin(); it != j.end(); ++it) {
 		symbol_metadata sm;
 		const auto &v = it.value();
@@ -65,7 +66,10 @@ bool metadata_save(const std::string &path,
 		j[sym] = entry;
 	}
 
-	/* Atomic write: write to tmp, then rename */
+	/*
+	 * Atomic write: write to a temp file first, then rename.
+	 * This prevents corruption if the process is killed mid-write.
+	 */
 	std::string tmp_path = path + ".tmp";
 	std::ofstream ofs(tmp_path);
 	if (!ofs.is_open()) {

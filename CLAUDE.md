@@ -9,6 +9,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Build Commands
 
 ```bash
+# Build and run (preferred)
+./run.sh                          # builds with make -j, runs with default config.json
+./run.sh path/to/config.json      # builds and runs with custom config
+
 # Build everything (trcache library + main binary)
 make
 
@@ -21,8 +25,11 @@ make -C trcache BUILD_MODE=debug
 # Clean all artifacts
 make clean
 
-# Run (requires trcache shared library on LD_LIBRARY_PATH)
+# Run manually (requires trcache shared library on LD_LIBRARY_PATH)
 LD_LIBRARY_PATH=./trcache ./tick_feeder_binance -c config.json
+
+# Reset metadata to re-download from scratch (backs up existing metadata)
+./reset_metadata.sh
 ```
 
 **Dependencies:** `libcurl`, `pthread`, `unzip` (system utility). JSON parsing uses vendored `nlohmann/json.hpp` in `third_party/`.
@@ -32,8 +39,8 @@ LD_LIBRARY_PATH=./trcache ./tick_feeder_binance -c config.json
 ### Data Flow
 
 ```
-config.json → main.cpp orchestration
-  → downloader: fetch monthly/daily ZIP archives from Binance Vision
+config.json → main.cpp orchestration (10-step pipeline)
+  → downloader: fetch daily ZIP archives from Binance Vision (libcurl)
   → decompressor: extract CSV via system unzip
   → csv_parser: parse trades, feed to trcache via trcache_feed_trade_data()
   → trcache engine: lock-free candle aggregation (tick-based or time-based)
@@ -44,26 +51,46 @@ config.json → main.cpp orchestration
 
 ### Candle Slot Template System (engine.cpp)
 
-The engine uses C++ template instantiation to generate per-slot callback functions (up to `MAX_CANDLE_SLOTS = 8`). Two candle strategies:
-- **TICK_MODULO** — closes when `(trade_id + 1) % threshold == 0`
-- **TIME_FIXED** — closes when timestamp crosses a fixed window boundary
+The engine uses C++ template instantiation to generate per-slot callback functions (up to `MAX_CANDLE_SLOTS = 8`). This avoids runtime parameter passing through trcache's opaque callback interface — each slot's threshold is stored in a global array `g_slot_configs[slot]` and read by its template instantiation.
 
-Each slot's `init`/`update`/`close` callbacks are generated at compile time. The custom candle struct extends `trcache_candle_base` with OHLCV fields plus `last_trade_id` for resume tracking.
+Two candle strategies:
+- **TICK_MODULO** — closes when `(trade_id + 1) % threshold == 0`. Implements gap detection: if a trade arrives beyond the current window, the candle is force-closed without consuming the trade.
+- **TIME_FIXED** — closes when timestamp crosses a fixed window boundary.
+
+The `update_callback` returns `true` if the trade was applied, `false` if the trade belongs to the next candle (triggering close).
+
+### Custom Candle Struct (types.h)
+
+`feeder_candle` extends `trcache_candle_base` with OHLCV fields plus `first_trade_id` and `last_trade_id`. Field definitions use offset-based metadata for SoA column extraction. Output includes 8 binary columns: keys + 5 OHLCV + 2 trade IDs.
 
 ### Output Format
 
-Binary column files per (symbol, candle_type):
+Binary column files per (symbol, candle_type), written via `pwrite()` with tracked offsets (supports resume without re-reading file positions):
 ```
-output_dir/SYMBOL/CANDLE_NAME/{keys.bin, open.bin, high.bin, low.bin, close.bin, volume.bin}
+output_dir/SYMBOL/CANDLE_NAME/{keys.bin, open.bin, high.bin, low.bin, close.bin, volume.bin, first_trade_id.bin, last_trade_id.bin}
 ```
 
 ### Incremental Resume
 
 `metadata.json` tracks per-symbol state: `last_closed_trade_id`, `last_processed_date`, and per-candle-type counts. Metadata writes use temp file + atomic rename.
 
+**Split metadata save strategy:** `last_processed_date` is saved after each month (download checkpoint), while `last_closed_trade_id` is saved only after `trcache_destroy()` to ensure all async batches are flushed first.
+
+### Graceful Shutdown
+
+A global `g_shutdown` flag (set by SIGINT/SIGTERM) lets the current file finish processing, then proceeds to engine teardown and final metadata save.
+
+### Daily-Only Download Strategy
+
+Despite coding support for monthly archive URLs, only daily archives are used because Binance monthly ZIPs can have missing dates within the file.
+
 ## Configuration (config.json)
 
 Key fields: `symbols` (list), `candles` (name/type/threshold), `output_dir`, `temp_dir`, `metadata_path`, `temp_disk_limit_mb`, and `trcache` block (`memory_limit_mb`, `worker_threads`, `batch_size_pow2`, `cached_batch_count_pow2`).
+
+- `threshold` in candle config: milliseconds for TIME_FIXED, trade count for TICK_MODULO
+- `batch_size_pow2`: log2 of candles per column batch (e.g., 12 = 4096 candles)
+- `cached_batch_count_pow2`: log2 of batches to keep before flush (0 = flush immediately)
 
 ## trcache Submodule
 
@@ -74,6 +101,7 @@ The `trcache/` directory is a git submodule containing a C library with its own 
 No unit test suite. Correctness is validated through:
 - **trcache benchmarks** (`trcache/benchmark/`) — throughput stress tests
 - **trcache validator** (`trcache/validator/`) — live Binance data integrity checks
+- **validate_output.py** — output validation script
 
 ## Code Style
 

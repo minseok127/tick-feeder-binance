@@ -1,0 +1,16 @@
+{
+  "symbols": ["BTCUSDT", "ETHUSDT"],
+  "candles": [
+    {"name": "10sec", "type": "TIME_FIXED", "threshold": 10000}
+  ],
+  "output_dir": "./output",
+  "temp_dir": "./tmp",
+  "metadata_path": "./metadata.json",
+  "temp_disk_limit_mb": 25600,
+  "trcache": {
+    "memory_limit_mb": 2048,
+    "worker_threads": 3,
+    "batch_size_pow2": 12,
+    "cached_batch_count_pow2": 0
+  }
+}

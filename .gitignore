@@ -1,0 +1,22 @@
+# Build artifacts
+*.o
+*.a
+*.so
+tick_feeder_binance
+
+# Runtime artifacts
+output/
+tmp/
+metadata.json
+
+# cscope
+cscope.*
+ncscope.*
+
+# Editor / IDE
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+compile_commands.json

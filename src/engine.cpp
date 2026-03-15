@@ -45,6 +45,7 @@ static void init_common(trcache_candle_base *c,
 	candle->low = price;
 	candle->close = price;
 	candle->volume = d->volume.as_double;
+	candle->first_trade_id = d->trade_id;
 	candle->last_trade_id = d->trade_id;
 
 	c->is_closed = false;

@@ -282,8 +282,9 @@ static int process_symbol(const feeder_config &config,
 					cur_year, cur_month);
 			}
 
+			int last_done_day = start_day - 1;
 			for (int d = start_day;
-		     d <= last_day && !g_shutdown; d++) {
+			     d <= last_day && !g_shutdown; d++) {
 				std::string url = make_daily_url(
 					symbol, cur_year,
 					cur_month, d);
@@ -324,15 +325,23 @@ static int process_symbol(const feeder_config &config,
 					remove(csv.c_str());
 				}
 				remove(zip_path.c_str());
+				last_done_day = d;
 			}
 
 			/*
-			 * Save last_processed_date checkpoint
-			 * for the daily batch.
+			 * Save last_processed_date checkpoint.
+			 * Use the actual last day processed, not
+			 * last_day, in case of early exit via
+			 * shutdown.
 			 */
-			date last = {cur_year, cur_month, last_day};
-			sm.last_processed_date = format_date(last);
-			metadata_save(config.metadata_path, meta);
+			if (last_done_day >= start_day) {
+				date last = {cur_year, cur_month,
+					last_done_day};
+				sm.last_processed_date =
+					format_date(last);
+				metadata_save(
+					config.metadata_path, meta);
+			}
 		}
 
 		done_months++;

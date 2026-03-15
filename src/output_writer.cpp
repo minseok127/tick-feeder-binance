@@ -14,9 +14,10 @@
 
 /* Field file names in order matching feeder_candle_fields[]. */
 static const char *FIELD_NAMES[] = {
-	"open", "high", "low", "close", "volume"
+	"open", "high", "low", "close", "volume",
+	"first_trade_id", "last_trade_id"
 };
-static const int NUM_OUTPUT_FIELDS = 5;
+static const int NUM_OUTPUT_FIELDS = 7;
 
 /*
  * Per-(symbol, candle_type) file descriptor set.
@@ -30,9 +31,9 @@ static const int NUM_OUTPUT_FIELDS = 5;
  */
 struct file_set {
 	int key_fd;
-	int field_fds[5];
+	int field_fds[7];
 	size_t key_offset;
-	size_t field_offsets[5];
+	size_t field_offsets[7];
 	uint64_t candle_count;
 };
 

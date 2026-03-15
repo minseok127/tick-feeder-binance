@@ -122,9 +122,16 @@ static int process_symbol(const feeder_config &config,
 	date end = today();
 	uint64_t skip_id = sm.last_closed_trade_id;
 
+	/* Count total months for progress */
+	int total_months =
+		(end.year - start.year) * 12 +
+		(end.month - start.month) + 1;
+	int done_months = 0;
+
 	std::cout << "[" << symbol << "] Processing from "
 		  << format_date(start) << " to "
-		  << format_date(end) << "\n";
+		  << format_date(end)
+		  << " (" << total_months << " months)\n";
 
 	mkdir(config.temp_dir.c_str(), 0755);
 
@@ -150,10 +157,10 @@ static int process_symbol(const feeder_config &config,
 			std::string zip_path =
 				config.temp_dir + "/" + fname;
 
-			std::cout << "  Downloading monthly: "
-				  << cur_year << "-"
-				  << (cur_month < 10 ? "0" : "")
-				  << cur_month << "\n";
+			printf("[%s] (%d/%d) %04d-%02d\n",
+				symbol.c_str(),
+				done_months + 1, total_months,
+				cur_year, cur_month);
 
 			int http = download_file(url, zip_path);
 			if (http == 200) {
@@ -165,9 +172,8 @@ static int process_symbol(const feeder_config &config,
 					csv_parse_and_feed(csv,
 						cache, symbol_id,
 						skip_id, &fed);
-					std::cout << "    Fed "
-						  << fed
-						  << " trades\n";
+					printf("  Fed %lu trades\n",
+						(unsigned long)fed);
 					remove(csv.c_str());
 				}
 				remove(zip_path.c_str());
@@ -203,9 +209,8 @@ static int process_symbol(const feeder_config &config,
 				metadata_save(config.metadata_path,
 					meta);
 			} else {
-				std::cout << "    Monthly not available"
-					  << " (HTTP " << http
-					  << "), trying daily\n";
+				printf("  Monthly not available, "
+					"trying daily\n");
 				/* Fall through to daily */
 				is_current_month = true;
 			}
@@ -255,19 +260,11 @@ static int process_symbol(const feeder_config &config,
 						cache, symbol_id,
 						skip_id, &fed);
 					if (fed > 0) {
-						std::cout << "    "
-							  << cur_year
-							  << "-"
-							  << (cur_month < 10
-							      ? "0" : "")
-							  << cur_month
-							  << "-"
-							  << (d < 10
-							      ? "0" : "")
-							  << d
-							  << ": "
-							  << fed
-							  << " trades\n";
+						printf("  %04d-%02d-%02d: "
+							"%lu trades\n",
+							cur_year,
+							cur_month, d,
+							(unsigned long)fed);
 					}
 					remove(csv.c_str());
 				}
@@ -297,6 +294,20 @@ static int process_symbol(const feeder_config &config,
 			}
 
 			metadata_save(config.metadata_path, meta);
+		}
+
+		/* Report candle counts */
+		done_months++;
+		for (int ci = 0;
+		     ci < (int)config.candles.size(); ci++) {
+			uint64_t cnt =
+				output_writer_get_candle_count(
+					writer, symbol_id, ci);
+			if (cnt > 0) {
+				printf("  [%s] candles so far: %lu\n",
+					config.candles[ci].name.c_str(),
+					(unsigned long)cnt);
+			}
 		}
 
 		/* Advance to next month */

@@ -1,8 +1,11 @@
 #include "csv_parser.h"
 
+#include <sys/stat.h>
+
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <iostream>
 
 /*
@@ -26,11 +29,20 @@ int csv_parse_and_feed(const std::string &csv_path,
 		return -1;
 	}
 
+	/* Get file size for progress reporting */
+	struct stat st;
+	fstat(fileno(fp), &st);
+	size_t file_size = (size_t)st.st_size;
+	size_t bytes_read = 0;
+	int last_pct = -1;
+	time_t last_report = time(nullptr);
+
 	char line[512];
 	uint64_t fed = 0;
 	trcache_trade_data td;
 
 	while (fgets(line, sizeof(line), fp)) {
+		bytes_read += strlen(line);
 		/* Column 0: agg_trade_id */
 		const char *p = line;
 		uint64_t trade_id = strtoull(p, nullptr, 10);
@@ -79,6 +91,27 @@ int csv_parse_and_feed(const std::string &csv_path,
 			return -1;
 		}
 		fed++;
+
+		/* Progress report every 5 seconds */
+		time_t now = time(nullptr);
+		if (now - last_report >= 5) {
+			int pct = file_size > 0
+				? (int)(bytes_read * 100 / file_size)
+				: 0;
+			if (pct != last_pct) {
+				fprintf(stderr,
+					"\r    [CSV] %d%% (%lu trades fed)",
+					pct,
+					(unsigned long)fed);
+				last_pct = pct;
+			}
+			last_report = now;
+		}
+	}
+
+	if (last_pct >= 0) {
+		fprintf(stderr, "\r    [CSV] 100%% (%lu trades fed)\n",
+			(unsigned long)fed);
 	}
 
 	fclose(fp);

@@ -7,12 +7,29 @@
 #include <cerrno>
 #include <cstdio>
 #include <cstring>
+#include <ctime>
 #include <iostream>
 
 static size_t write_cb(void *ptr, size_t size, size_t nmemb,
 	void *stream)
 {
 	return fwrite(ptr, size, nmemb, (FILE *)stream);
+}
+
+static int progress_cb(void * /*clientp*/,
+	curl_off_t dltotal, curl_off_t dlnow,
+	curl_off_t /*ultotal*/, curl_off_t /*ulnow*/)
+{
+	if (dltotal > 0) {
+		int pct = (int)(dlnow * 100 / dltotal);
+		double mb = (double)dlnow / (1024.0 * 1024.0);
+		double total_mb =
+			(double)dltotal / (1024.0 * 1024.0);
+		fprintf(stderr,
+			"\r    [DL] %d%% (%.1f / %.1f MB)",
+			pct, mb, total_mb);
+	}
+	return 0;
 }
 
 int download_file(const std::string &url,
@@ -35,9 +52,13 @@ int download_file(const std::string &url,
 	curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_cb);
 	curl_easy_setopt(curl, CURLOPT_WRITEDATA, fp);
 	curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
-	curl_easy_setopt(curl, CURLOPT_TIMEOUT, 300L);
+	curl_easy_setopt(curl, CURLOPT_TIMEOUT, 600L);
+	curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION,
+		progress_cb);
+	curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
 
 	CURLcode res = curl_easy_perform(curl);
+	fprintf(stderr, "\n");
 
 	long http_code = 0;
 	curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE,

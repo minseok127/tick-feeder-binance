@@ -2,6 +2,8 @@
 
 #include <sys/stat.h>
 
+#include <sched.h>
+
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -35,7 +37,6 @@ int csv_parse_and_feed(const std::string &csv_path,
 	size_t file_size = (size_t)st.st_size;
 	size_t bytes_read = 0;
 	int last_pct = -1;
-	time_t last_report = time(nullptr);
 
 	char line[512];
 	uint64_t fed = 0;
@@ -96,31 +97,35 @@ int csv_parse_and_feed(const std::string &csv_path,
 		td.price.as_double = price;
 		td.volume.as_double = quantity;
 
-		int ret = trcache_feed_trade_data(cache, &td,
-			symbol_id);
-		if (ret < 0) {
-			std::cerr << "[CSV] feed failed at trade_id="
-				  << trade_id << "\n";
-			fclose(fp);
-			if (trades_fed) *trades_fed = fed;
-			return -1;
+		/*
+		 * Retry on backpressure. trcache returns -1
+		 * when internal buffers are full (memory
+		 * pressure); yield and retry like benchmarks do.
+		 */
+		int retries = 0;
+		while (trcache_feed_trade_data(cache, &td,
+				symbol_id) != 0) {
+			if (retries == 0) {
+				fprintf(stderr,
+					"\n    [CSV] backpressure at "
+					"trade_id=%lu, retrying\n",
+					(unsigned long)trade_id);
+			}
+			retries++;
+			sched_yield();
 		}
 		fed++;
 
-		/* Progress report every 5 seconds */
-		time_t now = time(nullptr);
-		if (now - last_report >= 5) {
-			int pct = file_size > 0
-				? (int)(bytes_read * 100 / file_size)
-				: 0;
-			if (pct != last_pct) {
-				fprintf(stderr,
-					"\r    [CSV] %d%% (%lu trades fed)",
-					pct,
-					(unsigned long)fed);
-				last_pct = pct;
-			}
-			last_report = now;
+		/* Progress report */
+		int pct = file_size > 0
+			? (int)(bytes_read * 100 / file_size)
+			: 0;
+		if (pct != last_pct) {
+			fprintf(stderr,
+				"\r    [CSV] %d%% (%lu trades fed)",
+				pct,
+				(unsigned long)fed);
+			last_pct = pct;
 		}
 	}
 

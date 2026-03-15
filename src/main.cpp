@@ -148,7 +148,8 @@ static void clean_temp(const std::string &temp_dir)
 static int process_symbol(const feeder_config &config,
 	struct trcache *cache, int symbol_id,
 	const std::string &symbol,
-	metadata_map &meta)
+	metadata_map &meta,
+	output_writer_ctx *writer)
 {
 	symbol_metadata &sm = meta[symbol];
 
@@ -196,71 +197,18 @@ static int process_symbol(const feeder_config &config,
 			(cur_year == end.year &&
 			 cur_month == end.month);
 
-		if (!is_current_month) {
-			/*
-			 * Try monthly download first — one file
-			 * per month is faster than 28-31 daily files.
-			 * If the monthly ZIP returns non-200 (not yet
-			 * published), fall through to daily downloads.
-			 */
-			std::string url = make_monthly_url(
-				symbol, cur_year, cur_month);
-			char fname[256];
-			snprintf(fname, sizeof(fname),
-				"%s-aggTrades-%04d-%02d.zip",
-				symbol.c_str(),
-				cur_year, cur_month);
-			std::string zip_path =
-				config.temp_dir + "/" + fname;
+		printf("[%s] (%d/%d) %04d-%02d\n",
+			symbol.c_str(),
+			done_months + 1, total_months,
+			cur_year, cur_month);
 
-			printf("[%s] (%d/%d) %04d-%02d\n",
-				symbol.c_str(),
-				done_months + 1, total_months,
-				cur_year, cur_month);
-
-			int http = download_file(url, zip_path);
-			if (http == 200) {
-				/* Unzip and feed */
-				std::string csv = unzip_file(
-					zip_path, config.temp_dir);
-				if (!csv.empty()) {
-					uint64_t fed = 0;
-					csv_parse_and_feed(csv,
-						cache, symbol_id,
-						skip_id, &fed);
-					printf("  Fed %lu trades\n",
-						(unsigned long)fed);
-					remove(csv.c_str());
-				}
-				remove(zip_path.c_str());
-
-				/*
-				 * Save last_processed_date as a
-				 * checkpoint so we can skip this
-				 * month on restart after a crash.
-				 */
-				int last_day = days_in_month(
-					cur_year, cur_month);
-				date d = {cur_year, cur_month,
-					last_day};
-				sm.last_processed_date =
-					format_date(d);
-				metadata_save(config.metadata_path,
-					meta);
-			} else {
-				printf("  Monthly not available, "
-					"trying daily\n");
-				/* Fall through to daily */
-				is_current_month = true;
-			}
-		}
-
-		if (is_current_month) {
-			/*
-			 * Daily downloads: used for the current
-			 * month or when the monthly archive is not
-			 * yet available on Binance Vision.
-			 */
+		/*
+		 * Daily downloads only. Binance Vision monthly
+		 * archives can have missing dates within the
+		 * file (not just truncation), so daily is the
+		 * only reliable source.
+		 */
+		{
 			int start_day = 1;
 			if (cur_year == start.year &&
 			    cur_month == start.month &&
@@ -269,13 +217,11 @@ static int process_symbol(const feeder_config &config,
 			}
 
 			/*
-			 * Stop at yesterday (end.day - 1) for the
-			 * current month since today's data is
-			 * still accumulating.
+			 * Stop at yesterday for the current month
+			 * since today's data is still accumulating.
 			 */
 			int last_day;
-			if (cur_year == end.year &&
-			    cur_month == end.month) {
+			if (is_current_month) {
 				last_day = end.day - 1;
 			} else {
 				last_day = days_in_month(
@@ -298,13 +244,9 @@ static int process_symbol(const feeder_config &config,
 					config.temp_dir + "/"
 					+ fname;
 
-				printf("  [Daily] %04d-%02d-%02d\n",
-					cur_year, cur_month, d);
 				int http = download_file(
 					url, zip_path);
 				if (http != 200) {
-					printf("    Not available "
-						"(HTTP %d)\n", http);
 					continue;
 				}
 
@@ -320,7 +262,8 @@ static int process_symbol(const feeder_config &config,
 							"%lu trades\n",
 							cur_year,
 							cur_month, d,
-							(unsigned long)fed);
+							(unsigned long)
+							fed);
 					}
 					remove(csv.c_str());
 				}
@@ -328,12 +271,6 @@ static int process_symbol(const feeder_config &config,
 				last_done_day = d;
 			}
 
-			/*
-			 * Save last_processed_date checkpoint.
-			 * Use the actual last day processed, not
-			 * last_day, in case of early exit via
-			 * shutdown.
-			 */
 			if (last_done_day >= start_day) {
 				date last = {cur_year, cur_month,
 					last_done_day};
@@ -345,6 +282,14 @@ static int process_symbol(const feeder_config &config,
 		}
 
 		done_months++;
+
+		/* Report cumulative output size */
+		uint64_t cum_bytes =
+			output_writer_get_total_bytes(
+				writer, symbol_id);
+		printf("[%s] Output so far: %s\n",
+			symbol.c_str(),
+			format_bytes(cum_bytes).c_str());
 
 		/* Advance to next month */
 		cur_month++;
@@ -467,7 +412,7 @@ int main(int argc, char *argv[])
 	for (size_t i = 0;
 	     i < config.symbols.size() && !g_shutdown; i++) {
 		process_symbol(config, cache, symbol_ids[i],
-			config.symbols[i], meta);
+			config.symbols[i], meta, writer);
 	}
 
 	if (g_shutdown) {

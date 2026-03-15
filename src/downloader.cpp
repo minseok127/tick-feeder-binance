@@ -16,11 +16,14 @@ static size_t write_cb(void *ptr, size_t size, size_t nmemb,
 	return fwrite(ptr, size, nmemb, (FILE *)stream);
 }
 
+static bool g_progress_shown = false;
+
 static int progress_cb(void * /*clientp*/,
 	curl_off_t dltotal, curl_off_t dlnow,
 	curl_off_t /*ultotal*/, curl_off_t /*ulnow*/)
 {
 	if (dltotal > 0) {
+		g_progress_shown = true;
 		int pct = (int)(dlnow * 100 / dltotal);
 		double mb = (double)dlnow / (1024.0 * 1024.0);
 		double total_mb =
@@ -57,8 +60,11 @@ int download_file(const std::string &url,
 		progress_cb);
 	curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
 
+	g_progress_shown = false;
 	CURLcode res = curl_easy_perform(curl);
-	fprintf(stderr, "\n");
+	if (g_progress_shown) {
+		fprintf(stderr, "\n");
+	}
 
 	long http_code = 0;
 	curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE,

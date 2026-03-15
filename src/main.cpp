@@ -248,9 +248,15 @@ static int process_symbol(const feeder_config &config,
 					config.temp_dir + "/"
 					+ fname;
 
+				printf("  [Daily] %04d-%02d-%02d\n",
+					cur_year, cur_month, d);
 				int http = download_file(
 					url, zip_path);
-				if (http != 200) continue;
+				if (http != 200) {
+					printf("    Not available "
+						"(HTTP %d)\n", http);
+					continue;
+				}
 
 				std::string csv = unzip_file(
 					zip_path, config.temp_dir);
@@ -354,6 +360,33 @@ int main(int argc, char *argv[])
 
 	/* 2. Load metadata */
 	metadata_map meta = metadata_load(config.metadata_path);
+
+	/* Show current progress per symbol */
+	for (const auto &sym : config.symbols) {
+		auto it = meta.find(sym);
+		if (it != meta.end() &&
+		    !it->second.last_processed_date.empty()) {
+			date s = default_start(sym);
+			printf("[%s] Already processed: %s ~ %s"
+				" (last_trade_id: %lu)\n",
+				sym.c_str(),
+				format_date(s).c_str(),
+				it->second.last_processed_date
+					.c_str(),
+				(unsigned long)
+					it->second
+					.last_closed_trade_id);
+			for (const auto &[name, cnt] :
+			     it->second.candle_counts) {
+				printf("  [%s] %lu candles\n",
+					name.c_str(),
+					(unsigned long)cnt);
+			}
+		} else {
+			printf("[%s] No previous data\n",
+				sym.c_str());
+		}
+	}
 
 	/* 3. Create output writer */
 	int max_symbols = (int)config.symbols.size() + 10;

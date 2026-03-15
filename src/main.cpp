@@ -89,6 +89,25 @@ static date default_start(const std::string &symbol)
 	return {2020, 1, 1};
 }
 
+static std::string format_bytes(uint64_t bytes)
+{
+	char buf[64];
+	if (bytes >= (uint64_t)1024 * 1024 * 1024) {
+		snprintf(buf, sizeof(buf), "%.2f GB",
+			bytes / (1024.0 * 1024.0 * 1024.0));
+	} else if (bytes >= 1024 * 1024) {
+		snprintf(buf, sizeof(buf), "%.2f MB",
+			bytes / (1024.0 * 1024.0));
+	} else if (bytes >= 1024) {
+		snprintf(buf, sizeof(buf), "%.2f KB",
+			bytes / 1024.0);
+	} else {
+		snprintf(buf, sizeof(buf), "%lu B",
+			(unsigned long)bytes);
+	}
+	return buf;
+}
+
 static void clean_temp(const std::string &temp_dir)
 {
 	std::string cmd = "rm -f " + temp_dir + "/*.csv "
@@ -302,7 +321,7 @@ static int process_symbol(const feeder_config &config,
 			metadata_save(config.metadata_path, meta);
 		}
 
-		/* Report candle counts */
+		/* Report candle counts and output size */
 		done_months++;
 		for (int ci = 0;
 		     ci < (int)config.candles.size(); ci++) {
@@ -315,6 +334,15 @@ static int process_symbol(const feeder_config &config,
 					(unsigned long)cnt);
 			}
 		}
+		uint64_t sym_bytes =
+			output_writer_get_total_bytes(
+				writer, symbol_id);
+		uint64_t all_bytes =
+			output_writer_get_total_bytes(
+				writer, -1);
+		printf("  Output size: %s (total: %s)\n",
+			format_bytes(sym_bytes).c_str(),
+			format_bytes(all_bytes).c_str());
 
 		/* Advance to next month */
 		cur_month++;
@@ -487,6 +515,12 @@ int main(int argc, char *argv[])
 			trcache_batch_free(batch);
 		}
 	}
+
+	/* Report total output size */
+	uint64_t total_bytes =
+		output_writer_get_total_bytes(writer, -1);
+	printf("Total output size: %s\n",
+		format_bytes(total_bytes).c_str());
 
 	/* 8. Cleanup engine */
 	engine_destroy(cache);

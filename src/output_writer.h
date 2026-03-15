@@ -52,6 +52,13 @@ uint64_t output_writer_get_candle_count(
 	int symbol_id, int candle_idx);
 
 /*
+ * Get total bytes written for a symbol across all candle types.
+ * If symbol_id is -1, returns total for all symbols.
+ */
+uint64_t output_writer_get_total_bytes(
+	const output_writer_ctx *ctx, int symbol_id);
+
+/*
  * Set the symbol string for a given symbol_id.
  * Must be called after trcache_register_symbol() so the writer
  * knows which directory to write to.

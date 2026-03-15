@@ -108,6 +108,47 @@ static void ensure_files_open(output_writer_ctx *ctx,
 	}
 }
 
+/*
+ * Write a contiguous range [start, start+count) from batch arrays.
+ */
+static void write_range(file_set &fs,
+	trcache_candle_batch *batch, int start, int count)
+{
+	if (count <= 0) {
+		return;
+	}
+
+	/* Write keys */
+	if (fs.key_fd >= 0) {
+		size_t sz = (size_t)count * sizeof(uint64_t);
+		ssize_t w = pwrite(fs.key_fd,
+			batch->key_array + start, sz,
+			(off_t)fs.key_offset);
+		(void)w;
+		fs.key_offset += sz;
+	}
+
+	/* Write OHLCV columns */
+	for (int i = 0; i < NUM_OUTPUT_FIELDS; i++) {
+		if (fs.field_fds[i] < 0 ||
+		    batch->column_arrays[i] == nullptr) {
+			continue;
+		}
+		size_t elem_sz = (i < 5) ? sizeof(double)
+					  : sizeof(uint64_t);
+		size_t sz = (size_t)count * elem_sz;
+		const char *base =
+			(const char *)batch->column_arrays[i];
+		ssize_t w = pwrite(fs.field_fds[i],
+			base + (size_t)start * elem_sz,
+			sz, (off_t)fs.field_offsets[i]);
+		(void)w;
+		fs.field_offsets[i] += sz;
+	}
+
+	fs.candle_count += (uint64_t)count;
+}
+
 static void flush_cb(trcache * /*cache*/,
 	trcache_candle_batch *batch, void *ctx_ptr)
 {
@@ -126,47 +167,41 @@ static void flush_cb(trcache * /*cache*/,
 	file_set &fs = ctx->file_sets[idx];
 
 	/*
-	 * Count closed candles. In a batch from trcache, all candles
-	 * passed to flush are complete (closed). Write them all.
+	 * Only write closed candles. Unclosed candles at the end of
+	 * a batch represent in-progress aggregation; writing them
+	 * would corrupt resume since the trades that formed them
+	 * would be skipped on restart.
+	 *
+	 * Closed candles are contiguous at the front of the batch
+	 * (trcache closes candles in order). Scan for contiguous
+	 * closed runs and write them. Stop at the first unclosed
+	 * candle.
 	 */
-	/* Write keys */
-	if (fs.key_fd >= 0) {
-		size_t sz = (size_t)n * sizeof(uint64_t);
-		ssize_t n = pwrite(fs.key_fd,
-			batch->key_array, sz,
-			(off_t)fs.key_offset);
-		(void)n;
-		fs.key_offset += sz;
-	}
-
-	/* Write OHLCV columns */
-	for (int i = 0; i < NUM_OUTPUT_FIELDS; i++) {
-		if (fs.field_fds[i] < 0 ||
-		    batch->column_arrays[i] == nullptr) {
-			continue;
+	int closed_count = 0;
+	for (int i = 0; i < n; i++) {
+		if (batch->is_closed_array[i]) {
+			closed_count++;
+		} else {
+			break;
 		}
-		size_t elem_sz = (i < 5) ? sizeof(double)
-					  : sizeof(uint64_t);
-		size_t sz = (size_t)n * elem_sz;
-		ssize_t w = pwrite(fs.field_fds[i],
-			batch->column_arrays[i],
-			sz, (off_t)fs.field_offsets[i]);
-		(void)w;
-		fs.field_offsets[i] += sz;
 	}
 
-	fs.candle_count += (uint64_t)n;
+	write_range(fs, batch, 0, closed_count);
 
 	/*
-	 * Update last_trade_id from the last_trade_id column
-	 * of the last candle in the batch.
+	 * Update last_trade_id from the last *closed* candle only.
 	 */
-	uint64_t *ltid_col = (uint64_t *)batch->column_arrays[
-		FEED_COL_LAST_TRADE_ID];
-	if (ltid_col) {
-		uint64_t last = ltid_col[n - 1];
-		if (last > ctx->last_trade_ids[symbol_id]) {
-			ctx->last_trade_ids[symbol_id] = last;
+	if (closed_count > 0) {
+		uint64_t *ltid_col = (uint64_t *)
+			batch->column_arrays[FEED_COL_LAST_TRADE_ID];
+		if (ltid_col) {
+			uint64_t last =
+				ltid_col[closed_count - 1];
+			if (last >
+			    ctx->last_trade_ids[symbol_id]) {
+				ctx->last_trade_ids[symbol_id] =
+					last;
+			}
 		}
 	}
 }
@@ -264,6 +299,29 @@ uint64_t output_writer_get_candle_count(
 {
 	int idx = symbol_id * ctx->num_candle_types + candle_idx;
 	return ctx->file_sets[idx].candle_count;
+}
+
+uint64_t output_writer_get_total_bytes(
+	const output_writer_ctx *ctx, int symbol_id)
+{
+	uint64_t total = 0;
+	int s_start = 0;
+	int s_end = ctx->max_symbols;
+	if (symbol_id >= 0) {
+		s_start = symbol_id;
+		s_end = symbol_id + 1;
+	}
+	for (int s = s_start; s < s_end; s++) {
+		for (int c = 0; c < ctx->num_candle_types; c++) {
+			int idx = s * ctx->num_candle_types + c;
+			const file_set &fs = ctx->file_sets[idx];
+			total += fs.key_offset;
+			for (int i = 0; i < NUM_OUTPUT_FIELDS; i++) {
+				total += fs.field_offsets[i];
+			}
+		}
+	}
+	return total;
 }
 
 void output_writer_set_symbol(output_writer_ctx *ctx,

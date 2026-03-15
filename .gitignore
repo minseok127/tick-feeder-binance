@@ -8,6 +8,7 @@ tick_feeder_binance
 output/
 tmp/
 metadata.json
+*bak
 
 # cscope
 cscope.*

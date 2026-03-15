@@ -197,99 +197,88 @@ static int process_symbol(const feeder_config &config,
 			(cur_year == end.year &&
 			 cur_month == end.month);
 
-		printf("[%s] (%d/%d) %04d-%02d\n",
-			symbol.c_str(),
-			done_months + 1, total_months,
-			cur_year, cur_month);
-
 		/*
 		 * Daily downloads only. Binance Vision monthly
 		 * archives can have missing dates within the
 		 * file (not just truncation), so daily is the
 		 * only reliable source.
 		 */
-		{
-			int start_day = 1;
-			if (cur_year == start.year &&
-			    cur_month == start.month &&
-			    start.day > 1) {
-				start_day = start.day;
+		int start_day = 1;
+		if (cur_year == start.year &&
+		    cur_month == start.month &&
+		    start.day > 1) {
+			start_day = start.day;
+		}
+
+		/*
+		 * Stop at yesterday for the current month
+		 * since today's data is still accumulating.
+		 */
+		int last_day;
+		if (is_current_month) {
+			last_day = end.day - 1;
+		} else {
+			last_day = days_in_month(
+				cur_year, cur_month);
+		}
+
+		int last_done_day = start_day - 1;
+		for (int d = start_day;
+		     d <= last_day && !g_shutdown; d++) {
+			std::string url = make_daily_url(
+				symbol, cur_year,
+				cur_month, d);
+			char fname[256];
+			snprintf(fname, sizeof(fname),
+				"%s-aggTrades-"
+				"%04d-%02d-%02d.zip",
+				symbol.c_str(),
+				cur_year, cur_month, d);
+			std::string zip_path =
+				config.temp_dir + "/" + fname;
+
+			printf("[%s] %04d-%02d-%02d\n",
+				symbol.c_str(),
+				cur_year, cur_month, d);
+
+			int http = download_file(
+				url, zip_path);
+			if (http != 200) {
+				printf("  Not available\n");
+				continue;
 			}
 
-			/*
-			 * Stop at yesterday for the current month
-			 * since today's data is still accumulating.
-			 */
-			int last_day;
-			if (is_current_month) {
-				last_day = end.day - 1;
-			} else {
-				last_day = days_in_month(
-					cur_year, cur_month);
+			std::string csv = unzip_file(
+				zip_path, config.temp_dir);
+			if (!csv.empty()) {
+				uint64_t fed = 0;
+				csv_parse_and_feed(csv,
+					cache, symbol_id,
+					skip_id, &fed);
+				printf("  Fed %lu trades\n",
+					(unsigned long)fed);
+				remove(csv.c_str());
 			}
+			remove(zip_path.c_str());
+			last_done_day = d;
 
-			int last_done_day = start_day - 1;
-			for (int d = start_day;
-			     d <= last_day && !g_shutdown; d++) {
-				std::string url = make_daily_url(
-					symbol, cur_year,
-					cur_month, d);
-				char fname[256];
-				snprintf(fname, sizeof(fname),
-					"%s-aggTrades-"
-					"%04d-%02d-%02d.zip",
-					symbol.c_str(),
-					cur_year, cur_month, d);
-				std::string zip_path =
-					config.temp_dir + "/"
-					+ fname;
+			uint64_t cum_bytes =
+				output_writer_get_total_bytes(
+					writer, symbol_id);
+			printf("  Output: %s\n",
+				format_bytes(cum_bytes).c_str());
+		}
 
-				int http = download_file(
-					url, zip_path);
-				if (http != 200) {
-					continue;
-				}
-
-				std::string csv = unzip_file(
-					zip_path, config.temp_dir);
-				if (!csv.empty()) {
-					uint64_t fed = 0;
-					csv_parse_and_feed(csv,
-						cache, symbol_id,
-						skip_id, &fed);
-					if (fed > 0) {
-						printf("  %04d-%02d-%02d: "
-							"%lu trades\n",
-							cur_year,
-							cur_month, d,
-							(unsigned long)
-							fed);
-					}
-					remove(csv.c_str());
-				}
-				remove(zip_path.c_str());
-				last_done_day = d;
-			}
-
-			if (last_done_day >= start_day) {
-				date last = {cur_year, cur_month,
-					last_done_day};
-				sm.last_processed_date =
-					format_date(last);
-				metadata_save(
-					config.metadata_path, meta);
-			}
+		if (last_done_day >= start_day) {
+			date last = {cur_year, cur_month,
+				last_done_day};
+			sm.last_processed_date =
+				format_date(last);
+			metadata_save(
+				config.metadata_path, meta);
 		}
 
 		done_months++;
-
-		/* Report cumulative output size */
-		uint64_t cum_bytes =
-			output_writer_get_total_bytes(
-				writer, symbol_id);
-		printf("[%s] Output so far: %s\n",
-			symbol.c_str(),
-			format_bytes(cum_bytes).c_str());
 
 		/* Advance to next month */
 		cur_month++;

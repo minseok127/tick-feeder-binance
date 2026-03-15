@@ -30,7 +30,7 @@ FIELD_FILES = [
 
 ALL_BIN_FILES = ["keys.bin"] + [f[0] for f in FIELD_FILES]
 
-GAP_WARN_THRESHOLD = 100000
+GAP_WARN_THRESHOLD = 1
 
 
 class ValidationResult:

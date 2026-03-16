@@ -53,7 +53,7 @@ output_dir/SYMBOL/CANDLE_NAME/{keys,open,high,low,close,volume,first_trade_id,la
 ## Validate Output
 
 ```bash
-python3 validate_output.py --output-dir ./output --metadata ./metadata.json
+python3 validate_output.py --output-dir ./output --metadata ./metadata.json --config ./config.json
 ```
 
 Checks file size consistency, metadata match, trade ID continuity, key monotonicity, and OHLCV integrity.

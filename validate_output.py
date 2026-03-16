@@ -14,6 +14,7 @@ import argparse
 import json
 import struct
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 # All column files and their element sizes.
@@ -29,8 +30,6 @@ FIELD_FILES = [
 ]
 
 ALL_BIN_FILES = ["keys.bin"] + [f[0] for f in FIELD_FILES]
-
-GAP_WARN_THRESHOLD = 1
 
 
 class ValidationResult:
@@ -51,6 +50,14 @@ class ValidationResult:
     def warn(self, msg):
         self.warnings += 1
         print(f"  WARN: {msg}")
+
+
+def format_key(key, candle_type):
+    """Format a key value based on candle type."""
+    if candle_type == "TIME_FIXED":
+        dt = datetime.fromtimestamp(key / 1000, tz=timezone.utc)
+        return dt.strftime("%Y-%m-%d %H:%M:%S UTC")
+    return str(key)
 
 
 def read_bin(path, fmt):
@@ -116,7 +123,7 @@ def check_metadata_counts(candle_dir, symbol, candle_name,
         result.ok(f"{symbol}/{candle_name}: metadata count matches")
 
 
-def check_trade_continuity(candle_dir, result):
+def check_trade_continuity(candle_dir, keys, candle_type, result):
     """Check trade ID continuity between consecutive candles."""
     ftid, _ = read_bin(candle_dir / "first_trade_id.bin", "Q")
     ltid, _ = read_bin(candle_dir / "last_trade_id.bin", "Q")
@@ -132,8 +139,8 @@ def check_trade_continuity(candle_dir, result):
     for i in range(n):
         if ftid[i] > ltid[i]:
             result.fail(
-                f"{candle_dir}[{i}]: first_trade_id {ftid[i]} > "
-                f"last_trade_id {ltid[i]}"
+                f"{candle_dir}[{i}] ({format_key(keys[i], candle_type)}): "
+                f"first_trade_id {ftid[i]} > last_trade_id {ltid[i]}"
             )
             return
 
@@ -141,37 +148,38 @@ def check_trade_continuity(candle_dir, result):
     for i in range(n - 1):
         if ltid[i] >= ftid[i + 1]:
             result.fail(
-                f"{candle_dir}[{i}→{i+1}]: last_trade_id {ltid[i]} >= "
+                f"{candle_dir}[{i}→{i+1}] "
+                f"({format_key(keys[i], candle_type)}): "
+                f"last_trade_id {ltid[i]} >= "
                 f"next first_trade_id {ftid[i+1]}"
             )
             return
         gap = ftid[i + 1] - ltid[i]
-        if gap > GAP_WARN_THRESHOLD:
+        if gap > 1:
             result.warn(
-                f"{candle_dir}[{i}→{i+1}]: trade_id gap = {gap}"
+                f"{candle_dir}[{i}→{i+1}] "
+                f"({format_key(keys[i], candle_type)}): "
+                f"trade_id gap = {gap}"
             )
 
     result.ok(f"{candle_dir}: trade_id continuity OK")
 
 
-def check_keys_monotonic(candle_dir, result):
+def check_keys_monotonic(keys, candle_dir, candle_type, result):
     """Check that keys.bin values are strictly increasing."""
-    keys, _ = read_bin(candle_dir / "keys.bin", "Q")
-    if keys is None:
-        result.fail(f"{candle_dir}: cannot read keys.bin")
-        return
-
     for i in range(len(keys) - 1):
         if keys[i] >= keys[i + 1]:
             result.fail(
-                f"{candle_dir}[{i}]: key {keys[i]} >= next {keys[i+1]}"
+                f"{candle_dir}[{i}] "
+                f"({format_key(keys[i], candle_type)}): "
+                f"key >= next ({format_key(keys[i+1], candle_type)})"
             )
             return
 
     result.ok(f"{candle_dir}: keys strictly increasing")
 
 
-def check_ohlcv_integrity(candle_dir, result):
+def check_ohlcv_integrity(candle_dir, keys, candle_type, result):
     """Check OHLCV basic constraints."""
     o, _ = read_bin(candle_dir / "open.bin", "d")
     h, _ = read_bin(candle_dir / "high.bin", "d")
@@ -184,26 +192,28 @@ def check_ohlcv_integrity(candle_dir, result):
         return
 
     for i in range(len(o)):
+        fk = format_key(keys[i], candle_type)
         if h[i] < l[i]:
             result.fail(
-                f"{candle_dir}[{i}]: high {h[i]} < low {l[i]}"
+                f"{candle_dir}[{i}] ({fk}): "
+                f"high {h[i]} < low {l[i]}"
             )
             return
         if h[i] < o[i] or h[i] < c[i]:
             result.fail(
-                f"{candle_dir}[{i}]: high {h[i]} < open {o[i]} "
-                f"or close {c[i]}"
+                f"{candle_dir}[{i}] ({fk}): "
+                f"high {h[i]} < open {o[i]} or close {c[i]}"
             )
             return
         if l[i] > o[i] or l[i] > c[i]:
             result.fail(
-                f"{candle_dir}[{i}]: low {l[i]} > open {o[i]} "
-                f"or close {c[i]}"
+                f"{candle_dir}[{i}] ({fk}): "
+                f"low {l[i]} > open {o[i]} or close {c[i]}"
             )
             return
         if v[i] <= 0:
             result.fail(
-                f"{candle_dir}[{i}]: volume {v[i]} <= 0"
+                f"{candle_dir}[{i}] ({fk}): volume {v[i]} <= 0"
             )
             return
 
@@ -255,6 +265,10 @@ def main():
         "--metadata", required=True,
         help="Path to metadata.json"
     )
+    parser.add_argument(
+        "--config",
+        help="Path to config.json (for candle type info)"
+    )
     args = parser.parse_args()
 
     output_dir = Path(args.output_dir)
@@ -270,6 +284,16 @@ def main():
             metadata = json.load(f)
     else:
         print(f"Warning: metadata file not found: {metadata_path}")
+
+    # Build candle name → type mapping from config
+    candle_types = {}
+    if args.config:
+        config_path = Path(args.config)
+        if config_path.exists():
+            with open(config_path) as f:
+                cfg = json.load(f)
+            for c in cfg.get("candles", []):
+                candle_types[c["name"]] = c["type"]
 
     result = ValidationResult()
 
@@ -291,6 +315,7 @@ def main():
 
         for candle_dir in candle_dirs:
             candle_name = candle_dir.name
+            candle_type = candle_types.get(candle_name)
             print(f"\n--- {symbol}/{candle_name} ---")
 
             # 1. File size consistency
@@ -308,14 +333,24 @@ def main():
             if count == 0:
                 continue
 
+            # Read keys once for all subsequent checks
+            keys, _ = read_bin(candle_dir / "keys.bin", "Q")
+            if keys is None:
+                result.fail(f"{candle_dir}: cannot read keys.bin")
+                continue
+
             # 3. Trade ID continuity
-            check_trade_continuity(candle_dir, result)
+            check_trade_continuity(
+                candle_dir, keys, candle_type, result
+            )
 
             # 4. Keys monotonic
-            check_keys_monotonic(candle_dir, result)
+            check_keys_monotonic(keys, candle_dir, candle_type, result)
 
             # 5. OHLCV integrity
-            check_ohlcv_integrity(candle_dir, result)
+            check_ohlcv_integrity(
+                candle_dir, keys, candle_type, result
+            )
 
         # Check per-symbol last_closed_trade_id
         if metadata:

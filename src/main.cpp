@@ -13,7 +13,6 @@
 #include "decompressor.h"
 #include "downloader.h"
 #include "engine.h"
-#include "funding.h"
 #include "metadata.h"
 #include "output_writer.h"
 #include "types.h"
@@ -452,16 +451,7 @@ int main(int argc, char *argv[])
 
 	output_writer_destroy(writer);
 
-	/* 9. Fetch funding rates (skip on shutdown) */
-	if (!g_shutdown) {
-		curl_global_init(CURL_GLOBAL_DEFAULT);
-		for (const auto &sym : config.symbols) {
-			funding_fetch(sym, config.output_dir);
-		}
-		curl_global_cleanup();
-	}
-
-	/* 10. Clean temp dir */
+	/* 9. Clean temp dir */
 	clean_temp(config.temp_dir);
 
 	std::cout << "Done.\n";

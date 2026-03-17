@@ -3,6 +3,7 @@
 *.a
 *.so
 tick_feeder_binance
+funding_fetcher
 
 # Runtime artifacts
 output/

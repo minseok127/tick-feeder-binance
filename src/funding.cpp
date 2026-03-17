@@ -59,6 +59,18 @@ static void mkdirs(const std::string &path)
 	}
 }
 
+/*
+ * Default funding start timestamps (ms) per symbol.
+ * These correspond to when each symbol's funding data
+ * first became available on Binance Futures.
+ */
+static uint64_t default_funding_start(const std::string &sym)
+{
+	if (sym == "BTCUSDT") return 1568851200000ULL;
+	if (sym == "ETHUSDT") return 1573603200000ULL;
+	return 1577836800000ULL; /* 2020-01-01 */
+}
+
 int funding_fetch(const std::string &symbol,
 	const std::string &output_dir)
 {
@@ -72,9 +84,10 @@ int funding_fetch(const std::string &symbol,
 	 * Determine start time for incremental fetch.
 	 * Read the last uint64_t from funding_time.bin to find
 	 * the most recent timestamp already stored, then start
-	 * from the next millisecond.
+	 * from the next millisecond. If no file exists, start
+	 * from the symbol's default funding start date.
 	 */
-	uint64_t start_time = 0;
+	uint64_t start_time = default_funding_start(symbol);
 	{
 		struct stat st;
 		if (stat(time_path.c_str(), &st) == 0 &&
